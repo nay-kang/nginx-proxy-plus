@@ -12,7 +12,7 @@ function _M.before_proxy()
 		return domain
 	end
 
-	args = ngx.req.get_uri_args()
+	local args = ngx.req.get_uri_args()
 	if args['_DOMAIN_'] then
 		domain = args['_DOMAIN_']
 		domain = domain:gsub("^_",""):gsub("_$","")
@@ -44,47 +44,52 @@ end
 
 function _M.replace_domain(response_body,old_domain,new_domain,is_https)
 	local old_domain = old_domain:gsub("%.","%%.")
-	local pattern = "[\"(][^\"(%?]+" .. old_domain .. "[^\")]*[\")]"
+	-- Intend to capture all left char in regex,but lua meet performance problem when use ".-" in large text(length>5000)
+	-- local pattern = "(.-[\"%(])([^\"%(]+" .. old_domain .. "[^\"%)]*)([\"%)])"
+	local pattern = "([\"%(])([^\"%(]+" .. old_domain .. "[^\"%)]*)([\"%)])"
 	local start = 0
 	local eof = 0
+	local last_eof = 0
 	local replace_table = {}
+	local new_response_body = ""
+	local match_url = nil
+	local left = nil
+	local right = nil
+	local decode_url = nil
+
 	while true do
-		if response_body:find(pattern,start+1) then
-			start,eof = response_body:find(pattern,start+1)
-			local match = response_body:sub(start,eof)
-			replace_table[match] = start
+		start,eof,left,match_url,right = response_body:find(pattern,eof+1)
+		
+		if start then
+			local status,decode_url,need_encode = pcall(decode,match_url)
+			if status then
+				if is_https == false and decode_url:find("https") then
+					decode_url = decode_url:gsub("https","http")
+				end
+
+				local _,_,proto,match_domain,uri = decode_url:find("(.-)([^/]*" .. old_domain .. ")(.*)")
+				decode_url = proto .. new_domain .. "/_DOMAIN_=_" .. match_domain .. "_/" .. uri
+
+				if need_encode==1 then
+					decode_url = encode(decode_url)
+				end
+			else
+				print("undecode url:-------------------------------:",match_url)
+				decode_url = match_url
+			end
+
+			new_response_body = new_response_body .. response_body:sub(last_eof+1,start-1) .. left .. decode_url .. right
+
+			last_eof = eof
+
 		else break end
+
 	end
+	new_response_body = new_response_body .. response_body:sub(last_eof+1,-1)
+	return new_response_body
 	
-
-	for full_url,match_start in pairs(replace_table) do
-		local _,_,left,full_url,right = full_url:find("^([\"%(])(.*)([\"%)])")
-		local status,decode_url,need_encode = pcall(decode,full_url)
-
-		if status == false then
-			print("undecode url:-------------------------------:",full_url)
-			goto continue
-		end
-
-		local match_domain = decode_url:sub(decode_url:find("[%w-]+%." .. old_domain))	
-		decode_url = decode_url:gsub(match_domain,new_domain .. "/_DOMAIN_=_" .. match_domain .. "_/")
-		if is_https == false and decode_url:find("https") then
-			decode_url = decode_url:gsub("https","http")
-		end
-
-		if need_encode==1 then
-			decode_url = encode(decode_url)
-		end
-		full_url = escape_pattern(left .. full_url .. right)
-		decode_url = left .. decode_url .. right
-		decode_url = decode_url:gsub("%%", "%%%%")
-
-		response_body = response_body:gsub(full_url,decode_url)
-
-		::continue::
-	end
-	return response_body
 end
+
 function escape_pattern(str)
 	str = str:gsub("[%(%)%.%%%+%-%*%?%[%^%$%]]", "%%%1")
 	return str
